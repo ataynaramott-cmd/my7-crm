@@ -67,6 +67,7 @@ function dur(ms) {
   const d = Math.floor(h / 24);
   return `${d}d${h % 24 ? " " + (h % 24) + "h" : ""}`;
 }
+const since = (t) => `<span data-since="${t}">${dur(Date.now() - t)}</span>`;
 const fmt = (d) => (d ? new Date(d).toLocaleString("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
 const spHour = () => Number(new Intl.DateTimeFormat("pt-BR", { hour: "numeric", hour12: false, timeZone: TZ }).format(new Date())) % 24;
 function greeting() { const h = spHour(); return h >= 5 && h < 12 ? "Bom dia" : h >= 12 && h < 18 ? "Boa tarde" : "Boa noite"; }
@@ -132,22 +133,31 @@ const counts = (acts) => ({ lig: acts.filter((a) => a.tipo === "ligacao").length
 const classRank = { A: 0, B: 1, C: 2, D: 3 };
 
 /* ================= DADOS ================= */
-async function loadAll(silent) {
-  const qs = [
-    sb.from("leads").select("*").order("created_at", { ascending: false }).limit(3000),
-    sb.from("atividades").select("*").order("created_at", { ascending: false }).limit(10000),
-    sb.from("profiles").select("id,nome,avatar,ativo,email"),
-  ];
-  if (isAdmin()) qs.push(sb.rpc("listar_equipe"));
-  const [l, a, p, t] = await Promise.all(qs);
-  if (l.error) { if (!silent) toast("Não consegui carregar os leads", l.error.message); return; }
-  const newOnes = S.loaded ? (l.data || []).filter((x) => !S.known.has(x.id)) : [];
-  S.leads = l.data || []; S.atv = (a && a.data) || []; S.profiles = (p && p.data) || [];
-  if (t && !t.error) S.team = t.data || [];
+const cacheKey = () => "my7crm-cache-" + (S.me && S.me.id);
+function applyData(d, fromCache) {
+  const leads = d.leads || [];
+  const newOnes = S.loaded && !fromCache ? leads.filter((x) => !S.known.has(x.id)) : [];
+  S.leads = leads; S.atv = d.atividades || []; S.profiles = d.profiles || [];
+  if (d.team) S.team = d.team;
+  if (d.profile) S.profile = d.profile;
+  S.role = d.role || null; S.active = !!d.active;
   S.leads.forEach((x) => S.known.add(x.id));
   newOnes.forEach((x) => notify(`🔔 Novo lead: ${x.nome}`, `Classe ${x.classe} · ${x.segmento || "respondendo o quiz…"}`));
-  S.loaded = true;
-  render();
+}
+let loading = null;
+async function loadAll(silent) {
+  if (loading) return loading;
+  loading = (async () => {
+    const t0 = performance.now();
+    const { data, error } = await sb.rpc("crm_bootstrap");
+    S.lastLoad = Date.now(); S.loadMs = Math.round(performance.now() - t0);
+    if (error) { if (!silent) toast("Não consegui carregar os leads", error.message); return false; }
+    applyData(data, false);
+    try { sessionStorage.setItem(cacheKey(), JSON.stringify(data)); } catch {}
+    S.loaded = true;
+    return true;
+  })();
+  try { return await loading; } finally { loading = null; }
 }
 
 let rtChannel = null;
@@ -155,7 +165,7 @@ function subscribe() {
   if (rtChannel) sb.removeChannel(rtChannel);
   rtChannel = sb.channel("my7crm")
     .on("postgres_changes", { event: "*", schema: "public", table: "leads" }, (pl) => {
-      if (pl.eventType === "DELETE") { S.leads = S.leads.filter((x) => x.id !== (pl.old && pl.old.id)); render(); return; }
+      if (pl.eventType === "DELETE") { S.leads = S.leads.filter((x) => x.id !== (pl.old && pl.old.id)); schedule(); return; }
       const n = pl.new; if (!n || !n.id) return;
       const old = S.leads.find((x) => x.id === n.id);
       if (!old) {
@@ -165,12 +175,15 @@ function subscribe() {
         if (!old.completo && n.completo) notify(`✅ ${n.nome} completou o quiz`, `Classe ${n.classe} · score ${n.score} · ${n.faturamento || ""}`);
         Object.assign(old, n);
       }
-      render();
+      schedule();
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "atividades" }, (pl) => {
-      if (pl.new && !S.atv.some((a) => a.id === pl.new.id)) { S.atv.unshift(pl.new); render(); }
+      if (pl.new && !S.atv.some((a) => a.id === pl.new.id)) { S.atv.unshift(pl.new); schedule(); }
     })
-    .subscribe();
+    .subscribe((st) => {
+      const was = S.rt; S.rt = st;
+      if (st === "SUBSCRIBED" && was && was !== "SUBSCRIBED") loadAll(true).then(schedule);
+    });
 }
 
 /* ================= AUTH ================= */
@@ -187,23 +200,27 @@ async function boot() {
 async function start() {
   if (!S.session) { renderAuth(); return; }
   S.me = S.session.user;
-  const [pr, ro] = await Promise.all([
-    sb.from("profiles").select("*").eq("id", S.me.id).maybeSingle(),
-    sb.from("user_roles").select("role").eq("user_id", S.me.id),
-  ]);
-  S.profile = pr.data || { id: S.me.id, nome: (S.me.user_metadata && S.me.user_metadata.nome) || first(S.me.email), ativo: true };
-  const roles = (ro.data || []).map((r) => r.role);
-  S.role = roles.includes("admin") ? "admin" : roles.includes("sdr") ? "sdr" : null;
-  S.active = S.role === "admin" || (S.role === "sdr" && S.profile.ativo !== false);
-  if (!S.active) { renderPending(); return; }
   S.loaded = false; S.known = new Set();
-  sb.rpc("mover_para_lista_fria").then(() => {}, () => {});
-  window.onhashchange = route; route(true);
-  await loadAll();
+  window.onhashchange = () => route(); route(true);
+  let cached = null;
+  try { cached = JSON.parse(sessionStorage.getItem(cacheKey()) || "null"); } catch {}
+  if (cached && cached.active) { applyData(cached, true); S.loaded = true; route(true); render(); }
+  const ok = await loadAll(!!cached);
+  if (!ok && !cached) { renderPending("erro"); return; }
+  if (!S.profile) S.profile = { id: S.me.id, nome: (S.me.user_metadata && S.me.user_metadata.nome) || first(S.me.email), ativo: true };
+  if (!S.active) { renderPending(); return; }
+  route(true); render();
   subscribe();
-  clearInterval(S.poll); S.poll = setInterval(() => loadAll(true), 60e3);
-  clearInterval(S.tick); S.tick = setInterval(() => { if (!$("#drawer").hidden || !$("#modal").hidden) return; render(); }, 30e3);
+  clearInterval(S.poll); S.poll = setInterval(() => { if (S.rt !== "SUBSCRIBED" && !document.hidden) loadAll(true).then(schedule); }, 90e3);
+  clearInterval(S.tick); S.tick = setInterval(tick, 30e3);
 }
+let lastFull = Date.now();
+function tick() {
+  document.querySelectorAll("[data-since]").forEach((el) => { el.textContent = dur(Date.now() - Number(el.dataset.since)); });
+  const busy = !$("#drawer").hidden || !$("#modal").hidden || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
+  if (!busy && Date.now() - lastFull > 5 * 60e3) render();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && S.active && Date.now() - (S.lastLoad || 0) > 60e3) loadAll(true).then(schedule); });
 function renderAuth(mode = "entrar", msg = "") {
   $("#app").innerHTML = `<div class="auth"><form class="box" id="af">
     <div class="logo">MY7<span>.</span> CRM</div>
@@ -239,10 +256,11 @@ function traduz(m) {
   if (/password/i.test(m)) return "A senha precisa ter pelo menos 6 caracteres.";
   return m;
 }
-function renderPending() {
+function renderPending(kind) {
   const off = S.role === "sdr";
+  if (kind === "erro") { $("#app").innerHTML = `<div class="auth"><div class="box" style="text-align:center"><h1 style="font-size:24px">Ops! 😊</h1><p class="muted">Não consegui falar com o banco de dados agora. Confira sua internet e tente de novo.</p><div class="row" style="justify-content:center;margin-top:16px"><button class="btn pri" id="rl">Tentar de novo</button><button class="btn ghost" id="lo">Sair</button></div></div></div>`; $("#rl").onclick = start; $("#lo").onclick = () => sb.auth.signOut(); return; }
   $("#app").innerHTML = `<div class="auth"><div class="box" style="text-align:center">
-    <div style="display:grid;place-items:center">${AV.svg(S.profile && S.profile.avatar, 96)}</div>
+    <div style="display:grid;place-items:center">${AV.svg((S.profile && S.profile.avatar), 96)}</div>
     <h1 style="margin-top:14px;font-size:24px">${esc(greeting())}, ${esc(first(S.profile && S.profile.nome))}! 😊</h1>
     <p class="muted">${off ? "Seu acesso está desativado no momento. Fale com o administrador." : "Seu acesso está aguardando aprovação do administrador 😊"}</p>
     <div class="row" style="justify-content:center;margin-top:16px"><button class="btn" id="rl">Verificar de novo</button><button class="btn ghost" id="lo">Sair</button></div>
@@ -273,19 +291,24 @@ function shell(inner) {
     <button class="btn sm ghost" id="lo">Sair</button>
   </div></header><main>${inner}</main>`;
 }
+let rafId = 0;
+function schedule() { if (rafId) return; rafId = requestAnimationFrame(() => { rafId = 0; render(); }); }
 function render() {
   if (!S.me || !S.active) return;
+  lastFull = Date.now();
   const keep = window.scrollY;
+  const board = $(".board"), boardX = board ? board.scrollLeft : 0;
   const views = { painel: vPainel, funil: vFunil, fria: vFria, leads: vLeads, equipe: vEquipe, avatar: vAvatar };
   const focused = document.activeElement && document.activeElement.id;
   $("#app").innerHTML = shell(views[S.view]());
   bindShell(); (binders[S.view] || (() => {}))();
   if (focused && $("#" + focused) && /^f-/.test(focused)) { const el = $("#" + focused); el.focus(); if (el.setSelectionRange && el.value) el.setSelectionRange(el.value.length, el.value.length); }
   window.scrollTo(0, keep);
+  const nb = $(".board"); if (nb && boardX) nb.scrollLeft = boardX;
   if (S.drawer && !$("#drawer").hidden) renderDrawer();
 }
 function bindShell() {
-  $("#lo").onclick = () => { clearInterval(S.poll); clearInterval(S.tick); sb.auth.signOut(); };
+  $("#lo").onclick = () => { clearInterval(S.poll); clearInterval(S.tick); try { sessionStorage.removeItem(cacheKey()); } catch {} sb.auth.signOut(); };
   $("#alt").onclick = async () => {
     S.alerts = !S.alerts;
     try { localStorage.setItem("my7crm-alerts", S.alerts ? "1" : "0"); } catch {}
@@ -360,7 +383,7 @@ function vPainel() {
   </div>
   <div class="grid two" style="margin-top:14px">
     <section class="card"><h2>⚡ Precisam de atenção agora</h2><p class="tiny dim" style="margin:-8px 0 10px">Leads novos sem nenhum contato há mais de 15 minutos.</p>
-      <div class="list">${late.length ? late.slice(0, 8).map((l) => `<button class="item" data-lead="${esc(l.id)}">${clBadge(l)}<span class="grow"><b>${esc(l.nome)}</b><br><span class="tiny muted">${esc(l.segmento || "quiz incompleto")} · ${esc(l.faturamento || "")}</span></span><span class="tag red">esperando ${dur(Date.now() - ts(l.created_at))}</span></button>`).join("") : `<div class="empty">Tudo em dia por aqui 😊</div>`}</div></section>
+      <div class="list">${late.length ? late.slice(0, 8).map((l) => `<button class="item" data-lead="${esc(l.id)}">${clBadge(l)}<span class="grow"><b>${esc(l.nome)}</b><br><span class="tiny muted">${esc(l.segmento || "quiz incompleto")} · ${esc(l.faturamento || "")}</span></span><span class="tag red">esperando ${since(ts(l.created_at))}</span></button>`).join("") : `<div class="empty">Tudo em dia por aqui 😊</div>`}</div></section>
     <section class="card"><h2>📅 Cadência de hoje</h2><p class="tiny dim" style="margin:-8px 0 10px">O que falta fazer hoje em cada lead (cadência de 5 dias).</p>
       <div class="list">${today.length ? today.slice(0, 10).map(({ l, c }) => `<button class="item" data-lead="${esc(l.id)}">${clBadge(l)}<span class="grow"><b>${esc(l.nome)}</b><br><span class="tiny muted">D${c.d}/5 · falta: ${esc(c.pend.map((x) => x[1]).join(" + "))}</span></span><span class="tag">${esc(profName(l.responsavel_id) === "—" ? "sem responsável" : first(profName(l.responsavel_id)))}</span></button>`).join("") : `<div class="empty">Nenhuma tarefa de cadência pendente hoje 🎉</div>`}</div></section>
   </div>
@@ -402,7 +425,7 @@ function leadCard(l) {
   return `<div class="lc ${isLate(l) ? "late" : ""}" draggable="true" data-drag="${esc(l.id)}" data-lead="${esc(l.id)}" role="button" tabindex="0">
     <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="nm">${esc(l.nome)}</span>${clBadge(l)}</div>
     <div class="meta"><span>${esc(l.segmento || "—")}</span><span>${esc(l.faturamento || "")}</span>${l.completo ? "" : `<span class="tag">Incompleto · P${l.ultima_etapa}</span>`}</div>
-    <div class="meta"><span>⏱ No funil há ${dur(Date.now() - ts(l.created_at))}</span><span>Nesta etapa há ${dur(Date.now() - ts(l.status_alterado_em || l.created_at))}</span></div>
+    <div class="meta"><span>⏱ No funil há ${since(ts(l.created_at))}</span><span>Nesta etapa há ${since(ts(l.status_alterado_em || l.created_at))}</span></div>
     <div class="foot">${resp}<span class="spacer"></span>${cad ? `<span class="tag ${cad > 5 ? "red" : "g"}">Cadência ${cad > 5 ? "vencida" : "D" + cad + "/5"}</span>` : ""}<span style="white-space:nowrap">📞 ${c.lig} · 💬 ${c.wpp}</span></div>
   </div>`;
 }
@@ -464,12 +487,13 @@ function vLeads() {
     <select id="f-resp">${opt([["", "Todos os responsáveis"], ["sem", "Sem responsável"], ...S.profiles.map((p) => [p.id, p.nome || p.email])], f.resp)}</select>
     <select id="f-sort">${opt([["recentes", "Mais recentes"], ["antigos", "Mais antigos"], ["score", "Maior score"]], f.sort)}</select>
   </div>
-  <section class="card">${L.length ? `<div class="scroll"><table class="stack"><thead><tr><th>Lead</th><th>Classe</th><th>Cargo</th><th>Segmento</th><th>Faturamento</th><th>Etapa</th><th>Responsável</th><th>No funil há</th></tr></thead><tbody>${L.map((l) => `<tr class="click" data-lead="${esc(l.id)}"><td><b>${esc(l.nome)}</b>${l.completo ? "" : ` <span class="tag">Incompleto · P${l.ultima_etapa}</span>`}<div class="tiny dim">${esc(phoneFmt(l.whatsapp))}</div></td><td>${clBadge(l)}</td><td>${esc(l.cargo || "—")}</td><td>${esc(l.segmento || "—")}</td><td>${esc(l.faturamento || "—")}</td><td>${esc(stLabel(l.status))}</td><td>${esc(profName(l.responsavel_id))}</td><td>${dur(Date.now() - ts(l.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Nenhum lead com esses filtros.</div>`}</section>`;
+  <section class="card">${L.length ? `<div class="scroll"><table class="stack"><thead><tr><th>Lead</th><th>Classe</th><th>Cargo</th><th>Segmento</th><th>Faturamento</th><th>Etapa</th><th>Responsável</th><th>No funil há</th></tr></thead><tbody>${L.map((l) => `<tr class="click" data-lead="${esc(l.id)}"><td><b>${esc(l.nome)}</b>${l.completo ? "" : ` <span class="tag">Incompleto · P${l.ultima_etapa}</span>`}<div class="tiny dim">${esc(phoneFmt(l.whatsapp))}</div></td><td>${clBadge(l)}</td><td>${esc(l.cargo || "—")}</td><td>${esc(l.segmento || "—")}</td><td>${esc(l.faturamento || "—")}</td><td>${esc(stLabel(l.status))}</td><td>${esc(profName(l.responsavel_id))}</td><td>${since(ts(l.created_at))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Nenhum lead com esses filtros.</div>`}</section>`;
 }
 binders.leads = () => {
   ["q", "classe", "status", "comp", "resp", "sort"].forEach((k) => {
     const el = $("#f-" + k);
-    el.addEventListener(k === "q" ? "input" : "change", () => { S.filters[k] = el.value; render(); });
+    let tmr = 0;
+    el.addEventListener(k === "q" ? "input" : "change", () => { S.filters[k] = el.value; clearTimeout(tmr); tmr = setTimeout(render, k === "q" ? 180 : 0); });
   });
   $("#csv").onclick = () => {
     const cols = ["created_at", "nome", "whatsapp", "cargo", "segmento", "faturamento", "instagram", "score", "classe", "status", "completo", "ultima_etapa", "origem", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "primeiro_contato_em", "notas"];
@@ -497,8 +521,8 @@ function vEquipe() {
   <p class="tiny dim">Ações = ligações + mensagens + respostas + reuniões + e-mails (notas contam à parte). Contato = leads com ligação atendida ou resposta ÷ leads trabalhados. Speed to lead = mediana do tempo entre o lead chegar e o 1º contato.</p></section>`;
 }
 binders.equipe = () => {
-  document.querySelectorAll("[data-aprova]").forEach((b) => (b.onclick = async () => { b.disabled = true; const { error } = await sb.rpc("aprovar_sdr", { p_user: b.dataset.aprova }); if (error) toast("Não deu certo", error.message); else toast("✅ Acesso aprovado", "A pessoa já pode entrar no CRM."); loadAll(true); }));
-  document.querySelectorAll("[data-ativo]").forEach((b) => (b.onclick = async () => { b.disabled = true; const { error } = await sb.rpc("definir_ativo", { p_user: b.dataset.ativo, p_ativo: b.dataset.v === "1" }); if (error) toast("Não deu certo", error.message); loadAll(true); }));
+  document.querySelectorAll("[data-aprova]").forEach((b) => (b.onclick = async () => { const t = S.team.find((x) => x.id === b.dataset.aprova); if (t) { t.papel = "sdr"; t.ativo = true; } render(); const { error } = await sb.rpc("aprovar_sdr", { p_user: b.dataset.aprova }); if (error) { toast("Não deu certo", error.message); loadAll(true).then(schedule); } else toast("✅ Acesso aprovado", "A pessoa já pode entrar no CRM."); }));
+  document.querySelectorAll("[data-ativo]").forEach((b) => (b.onclick = async () => { const v = b.dataset.v === "1", t = S.team.find((x) => x.id === b.dataset.ativo); if (t) t.ativo = v; const p = prof(b.dataset.ativo); if (p) p.ativo = v; render(); const { error } = await sb.rpc("definir_ativo", { p_user: b.dataset.ativo, p_ativo: v }); if (error) { toast("Não deu certo", error.message); loadAll(true).then(schedule); } }));
 };
 
 /* ================= AVATAR ================= */
@@ -521,17 +545,22 @@ function vAvatar() {
     </div></div>`;
 }
 binders.avatar = () => {
-  document.querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => { draftAv[b.dataset.k] = b.dataset.v; render(); }));
-  $("#avr").onclick = () => { draftAv = AV.random(); render(); };
+  const refresh = () => {
+    $("#avp").innerHTML = AV.svg(draftAv, 200);
+    document.querySelectorAll("[data-k]").forEach((x) => x.classList.toggle("on", draftAv[x.dataset.k] === x.dataset.v));
+  };
+  document.querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => { draftAv[b.dataset.k] = b.dataset.v; refresh(); }));
+  $("#avr").onclick = () => { draftAv = AV.random(); refresh(); };
   $("#avs").onclick = async () => {
     const nome = $("#f-nome").value.trim() || S.profile.nome;
-    $("#avs").disabled = true;
-    const { error } = await sb.from("profiles").update({ avatar: draftAv, nome }).eq("id", S.me.id);
-    if (error) { toast("Não consegui salvar", error.message); $("#avs").disabled = false; return; }
-    S.profile.avatar = draftAv; S.profile.nome = nome;
-    const p = prof(S.me.id); if (p) { p.avatar = draftAv; p.nome = nome; }
+    const before = { avatar: S.profile.avatar, nome: S.profile.nome };
+    const av = Object.assign({}, draftAv);
+    S.profile.avatar = av; S.profile.nome = nome;
+    const p = prof(S.me.id); if (p) { p.avatar = av; p.nome = nome; }
     toast("😊 Avatar salvo!", "Ficou ótimo.");
     render();
+    const { error } = await sb.from("profiles").update({ avatar: av, nome }).eq("id", S.me.id);
+    if (error) { Object.assign(S.profile, before); if (p) Object.assign(p, before); toast("Não consegui salvar o avatar", error.message); render(); }
   };
 };
 
@@ -543,24 +572,45 @@ async function setStatus(id, status) {
   if (error) { l.status = prev; render(); toast("Não consegui mover o lead", error.message); }
 }
 async function assume(id) {
+  const l = S.leads.find((x) => x.id === id); if (!l) return;
+  const prev = { responsavel_id: l.responsavel_id, assumido_em: l.assumido_em };
+  l.responsavel_id = S.me.id; l.assumido_em = new Date().toISOString();
+  toast("👍 Lead assumido", "Agora ele é seu."); render();
   const { error } = await sb.from("leads").update({ responsavel_id: S.me.id }).eq("id", id);
-  if (error) toast("Não consegui assumir", error.message); else { const l = S.leads.find((x) => x.id === id); if (l) l.responsavel_id = S.me.id; toast("👍 Lead assumido", "Agora ele é seu."); render(); }
+  if (error) { Object.assign(l, prev); render(); toast("Não consegui assumir", error.message); }
 }
-async function addAtv(lead_id, tipo, resultado, descricao) {
-  const row = { lead_id, user_id: S.me.id, tipo, resultado: resultado || null, descricao: descricao ? descricao.slice(0, 2000) : null };
-  const { data, error } = await sb.from("atividades").insert(row).select().single();
-  if (error) { toast("Não consegui registrar", error.message); return false; }
-  if (data && !S.atv.some((a) => a.id === data.id)) S.atv.unshift(data);
-  const fresh = await sb.from("leads").select("*").eq("id", lead_id).maybeSingle();
-  if (fresh.data) { const i = S.leads.findIndex((x) => x.id === lead_id); if (i >= 0) S.leads[i] = fresh.data; else S.leads.unshift(fresh.data); }
-  render(); return true;
+function addAtv(lead_id, tipo, resultado, descricao) {
+  const l = S.leads.find((x) => x.id === lead_id);
+  const now = new Date().toISOString();
+  const row = { id: crypto.randomUUID(), lead_id, user_id: S.me.id, tipo, resultado: resultado || null, descricao: descricao ? descricao.slice(0, 2000) : null };
+  const local = Object.assign({ created_at: now, dia_cadencia: l ? Math.max(1, cadDay(l)) : 1 }, row);
+  S.atv.unshift(local);
+  let prev = null;
+  if (l) {
+    prev = { responsavel_id: l.responsavel_id, primeiro_contato_em: l.primeiro_contato_em, status: l.status, status_alterado_em: l.status_alterado_em };
+    if (!l.responsavel_id) { l.responsavel_id = S.me.id; l.assumido_em = now; }
+    if (!l.primeiro_contato_em && tipo !== "nota") l.primeiro_contato_em = now;
+    const ns = tipo === "resposta_lead" && resultado === "sem_interesse" ? "perdido" : tipo === "reuniao_agendada" ? "reuniao" : ((tipo === "ligacao" && resultado === "atendeu") || tipo === "resposta_lead") && l.status === "novo" ? "em_contato" : l.status;
+    if (ns !== l.status) { l.status = ns; l.status_alterado_em = now; }
+  }
+  render();
+  sb.from("atividades").insert(row).then(({ error }) => {
+    if (!error) return;
+    S.atv = S.atv.filter((a) => a.id !== row.id);
+    if (l && prev) Object.assign(l, prev);
+    render(); toast("Não consegui registrar a ação", error.message);
+  });
+  return true;
 }
 async function reactivate(id) {
+  const l = S.leads.find((x) => x.id === id); if (!l) return;
+  const prev = { status: l.status, status_alterado_em: l.status_alterado_em, reativado_em: l.reativado_em };
+  const now = new Date().toISOString();
+  l.status = "novo"; l.status_alterado_em = now; l.reativado_em = now;
+  toast("♻️ Lead reativado", "Ele volta para Novo com uma nova cadência de 5 dias."); render();
   const { error } = await sb.from("leads").update({ status: "novo" }).eq("id", id);
-  if (error) { toast("Não consegui reativar", error.message); return; }
-  await addAtv(id, "nota", null, `Reativado por ${S.profile.nome || "equipe"}`);
-  toast("♻️ Lead reativado", "Ele volta para Novo com uma nova cadência de 5 dias.");
-  loadAll(true);
+  if (error) { Object.assign(l, prev); render(); toast("Não consegui reativar", error.message); return; }
+  addAtv(id, "nota", null, `Reativado por ${S.profile.nome || "equipe"}`);
 }
 
 /* ================= DRAWER DO LEAD ================= */
@@ -572,11 +622,12 @@ function renderDrawer() {
   const notesFocus = document.activeElement && document.activeElement.id === "d-notas";
   if (notesFocus) return;
   const team = S.profiles.filter((p) => p.ativo !== false);
+  const oldPane = $("#drawer .pane"), paneY = oldPane && oldPane.dataset.lead === l.id ? oldPane.scrollTop : 0;
   const cadHtml = `<div class="cad">${[1, 2, 3, 4, 5].map((d) => `<div class="${active && d === day ? "today" : d < day ? "past" : ""}"><b>D${d}${active && d === day ? " · hoje" : ""}</b>${CAD[d].map(([t, lb]) => `${cadDone(l, acts, d, t) ? "✅" : active && d < day ? "⚠️" : "⬜"} ${esc(lb)}`).join("<br>")}</div>`).join("")}</div>`;
-  $("#drawer").innerHTML = `<div class="pane" role="dialog" aria-modal="true" aria-label="Lead ${esc(l.nome)}">
+  $("#drawer").innerHTML = `<div class="pane" data-lead-pane="1" data-lead="${esc(l.id)}" role="dialog" aria-modal="true" aria-label="Lead ${esc(l.nome)}">
     <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><h1 style="font-size:26px">${esc(l.nome)}</h1><div class="row" style="margin-top:6px">${clBadge(l)}<span class="tag">${esc(CLASSE_TXT[l.classe] || "")}</span>${l.completo ? "" : `<span class="tag">Incompleto — parou na pergunta ${l.ultima_etapa}</span>`}</div></div><button class="btn sm ghost" id="dx" aria-label="Fechar">✕</button></div>
     <div class="row" style="margin-top:14px"><a class="btn wa" href="${esc(waLink(l.whatsapp))}" target="_blank" rel="noopener">💬 ${esc(phoneFmt(l.whatsapp))}</a>${l.instagram ? `<a class="btn" href="https://instagram.com/${encodeURIComponent(l.instagram)}" target="_blank" rel="noopener">📸 @${esc(l.instagram)}</a>` : ""}</div>
-    <div class="counters" style="margin-top:14px"><span><b>${dur(Date.now() - ts(l.created_at))}</b><br>no funil</span><span><b>${dur(Date.now() - ts(l.status_alterado_em || l.created_at))}</b><br>nesta etapa</span><span><b>${c.lig}</b><br>ligações</span><span><b>${c.wpp}</b><br>mensagens</span><span><b>${c.tot}</b><br>tentativas</span></div>
+    <div class="counters" style="margin-top:14px"><span><b>${since(ts(l.created_at))}</b><br>no funil</span><span><b>${since(ts(l.status_alterado_em || l.created_at))}</b><br>nesta etapa</span><span><b>${c.lig}</b><br>ligações</span><span><b>${c.wpp}</b><br>mensagens</span><span><b>${c.tot}</b><br>tentativas</span></div>
     <div class="sec"><div class="row"><div style="flex:1;min-width:160px"><label for="d-st">Etapa</label><select id="d-st">${STATUS_ALL.map(([k, lb]) => `<option value="${k}" ${l.status === k ? "selected" : ""}>${lb}</option>`).join("")}</select></div>
       <div style="flex:1;min-width:160px"><label for="d-resp">Responsável</label>${isAdmin() ? `<select id="d-resp"><option value="">Sem responsável</option>${team.map((p) => `<option value="${esc(p.id)}" ${l.responsavel_id === p.id ? "selected" : ""}>${esc(p.nome || p.email)}</option>`).join("")}</select>` : l.responsavel_id ? `<div style="padding:10px 0">${esc(profName(l.responsavel_id))}</div>` : `<button class="btn" id="d-assume" style="width:100%">Assumir lead</button>`}</div></div></div>
     <div class="sec"><h2>Registrar ação</h2><div class="acts">
@@ -589,14 +640,15 @@ function renderDrawer() {
     <div class="sec"><h2>Histórico</h2>${acts.length ? `<ul class="tl">${acts.map(atvLi).join("")}</ul>` : `<div class="empty">Nenhuma ação registrada ainda.</div>`}</div>
     <div class="sec"><h2>Respostas do quiz</h2><dl class="kv"><dt>Cargo</dt><dd>${esc(l.cargo || "—")}</dd><dt>Segmento</dt><dd>${esc(l.segmento || "—")}</dd><dt>Faturamento</dt><dd>${esc(l.faturamento || "—")}</dd><dt>Instagram</dt><dd>${l.instagram ? "@" + esc(l.instagram) : "—"}</dd><dt>Chegou em</dt><dd>${fmt(l.created_at)}</dd><dt>1º contato</dt><dd>${l.primeiro_contato_em ? `${fmt(l.primeiro_contato_em)} (${dur(ts(l.primeiro_contato_em) - ts(l.created_at))} depois)` : "—"}</dd><dt>Botão clicado</dt><dd>${esc(l.origem || "—")}</dd><dt>UTM source</dt><dd>${esc(l.utm_source || "—")}</dd><dt>UTM medium</dt><dd>${esc(l.utm_medium || "—")}</dd><dt>UTM campaign</dt><dd>${esc(l.utm_campaign || "—")}</dd><dt>UTM content</dt><dd>${esc(l.utm_content || "—")}</dd><dt>UTM term</dt><dd>${esc(l.utm_term || "—")}</dd></dl></div>
   </div>`;
+  const np = $("#drawer .pane"); if (np && paneY) np.scrollTop = paneY;
   $("#dx").onclick = closeLead;
   $("#drawer").onclick = (e) => { if (e.target.id === "drawer") closeLead(); };
   $("#d-st").onchange = (e) => setStatus(l.id, e.target.value);
-  if ($("#d-resp")) $("#d-resp").onchange = async (e) => { const v = e.target.value || null; const { error } = await sb.from("leads").update({ responsavel_id: v }).eq("id", l.id); if (error) toast("Não consegui trocar", error.message); else { l.responsavel_id = v; render(); } };
+  if ($("#d-resp")) $("#d-resp").onchange = async (e) => { const v = e.target.value || null, pv = l.responsavel_id; l.responsavel_id = v; render(); const { error } = await sb.from("leads").update({ responsavel_id: v }).eq("id", l.id); if (error) { l.responsavel_id = pv; render(); toast("Não consegui trocar", error.message); } };
   if ($("#d-assume")) $("#d-assume").onclick = () => assume(l.id);
   document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => actModal(l, b.dataset.act)));
   const n = $("#d-notas");
-  n.onblur = async () => { if ((l.notas || "") === n.value) return; const { error } = await sb.from("leads").update({ notas: n.value }).eq("id", l.id); $("#d-nst").textContent = error ? "Não consegui salvar: " + error.message : "✓ Salvo"; if (!error) l.notas = n.value; };
+  n.onblur = async () => { if ((l.notas || "") === n.value) return; const pv = l.notas, v = n.value; l.notas = v; $("#d-nst").textContent = "Salvando…"; const { error } = await sb.from("leads").update({ notas: v }).eq("id", l.id); if (error) l.notas = pv; const st = $("#d-nst"); if (st) st.textContent = error ? "Não consegui salvar: " + error.message : "✓ Salvo"; };
   if ($("#d-copy")) $("#d-copy").onclick = async () => { try { await navigator.clipboard.writeText(l.mensagem_sugerida); toast("📋 Mensagem copiada"); } catch { toast("Não consegui copiar", "Selecione o texto e copie manualmente."); } };
   if ($("#d-send")) $("#d-send").addEventListener("click", () => { setTimeout(() => { const box = $("#d-after"); if (box) box.innerHTML = `<div class="row" style="margin-top:8px"><span class="small">Enviou a mensagem?</span><button class="btn sm pri" id="d-reg">Registrar WhatsApp enviado</button></div>`; const r = $("#d-reg"); if (r) r.onclick = () => addAtv(l.id, "whatsapp", "enviada", "Mensagem sugerida enviada"); }, 300); });
 }
@@ -618,9 +670,11 @@ function actModal(l, tipo) {
   m.onclick = (e) => { if (e.target === m) m.hidden = true; };
   $("#m-d").focus();
   $("#mf").onsubmit = async (e) => {
-    e.preventDefault(); $("#m-ok").disabled = true;
-    const ok = await addAtv(l.id, tipo, res, $("#m-d").value.trim());
-    if (ok) { m.hidden = true; toast(`${t.ic} ${t.lb} registrada`, l.nome); renderDrawer(); } else $("#m-ok").disabled = false;
+    e.preventDefault();
+    const txt = $("#m-d").value.trim();
+    m.hidden = true;
+    addAtv(l.id, tipo, res, txt);
+    toast(`${t.ic} ${t.lb} registrada`, l.nome);
   };
 }
 
