@@ -45,7 +45,7 @@ const CLASSE_TXT = { A: "Prioridade máxima", B: "Boa oportunidade", C: "Nutrir"
 /* ================= ESTADO ================= */
 const S = {
   session: null, me: null, profile: null, role: null, active: false,
-  leads: [], atv: [], profiles: [], team: [], closers: [], ganhos: [], contratos: [], ads: [], integ: null,
+  leads: [], atv: [], profiles: [], team: [], closers: [], ganhos: [], contratos: [], ads: [], integ: null, alertas: [],
   period: "7d", view: "painel", drawer: null, known: new Set(), loaded: false,
   filters: { q: "", classe: "", status: "", comp: "", resp: "", sort: "recentes" },
   boardMine: false, boardClasse: "", unseen: 0,
@@ -139,7 +139,7 @@ function applyData(d, fromCache) {
   const newOnes = S.loaded && !fromCache ? leads.filter((x) => !S.known.has(x.id)) : [];
   S.leads = leads; S.atv = d.atividades || []; S.profiles = d.profiles || [];
   if (d.team) S.team = d.team;
-  S.closers = d.closers || []; S.ganhos = d.ganhos || []; S.contratos = d.contratos || []; S.ads = d.ads || []; S.integ = d.integracao || null;
+  S.alertas = d.alertas || []; S.closers = d.closers || []; S.ganhos = d.ganhos || []; S.contratos = d.contratos || []; S.ads = d.ads || []; S.integ = d.integracao || null;
   if (d.profile) S.profile = d.profile;
   S.role = d.role || null; S.active = !!d.active;
   S.leads.forEach((x) => S.known.add(x.id));
@@ -176,6 +176,13 @@ function subscribe() {
         if (!old.completo && n.completo) notify(`✅ ${n.nome} completou o quiz`, `Classe ${n.classe} · score ${n.score} · ${n.faturamento || ""}`);
         Object.assign(old, n);
       }
+      schedule();
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "alertas" }, (pl) => {
+      const n = pl.new; if (!n || !n.id) return;
+      const old = S.alertas.find((a) => a.id === n.id);
+      if (old) Object.assign(old, n);
+      else { S.alertas.unshift(n); if (n.status === "aberto") notifyWA(n); }
       schedule();
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "ganhos" }, (pl) => {
@@ -222,7 +229,8 @@ let lastFull = Date.now();
 function tick() {
   document.querySelectorAll("[data-since]").forEach((el) => { el.textContent = dur(Date.now() - Number(el.dataset.since)); });
   const busy = !$("#drawer").hidden || !$("#modal").hidden || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
-  if (!busy && Date.now() - lastFull > 5 * 60e3) render();
+  const openAl = (S.alertas || []).some((a) => a.status === "aberto");
+  if (!busy && (openAl || Date.now() - lastFull > 5 * 60e3)) render();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.active && Date.now() - (S.lastLoad || 0) > 60e3) loadAll(true).then(schedule); });
 function renderAuth(mode = "entrar", msg = "") {
@@ -294,7 +302,7 @@ function shell(inner) {
     <button class="btn sm ghost" id="alt" title="Som e notificações de novos leads">${S.alerts ? "🔔 Alertas ligados" : "🔕 Ativar alertas"}</button>
     <a href="#avatar" class="me" title="Meu avatar">${AV.svg(S.profile.avatar, 36)}</a>
     <button class="btn sm ghost" id="lo">Sair</button>
-  </div></header><main>${inner}</main>`;
+  </div></header><main>${alertBanner()}${inner}</main>`;
 }
 let rafId = 0;
 function schedule() { if (rafId) return; rafId = requestAnimationFrame(() => { rafId = 0; render(); }); }
@@ -326,6 +334,14 @@ function bindShell() {
   document.querySelectorAll("[data-lead]").forEach((el) => el.addEventListener("click", (e) => { if (e.target.closest("[data-stop]")) return; openLead(el.dataset.lead); }));
   document.querySelectorAll("[data-period]").forEach((b) => (b.onclick = () => { S.period = b.dataset.period; render(); }));
   document.querySelectorAll("[data-assume]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); assume(b.dataset.assume); }));
+  document.querySelectorAll("[data-alreg]").forEach((b) => (b.onclick = () => novoLeadModal(S.alertas.find((a) => a.id === b.dataset.alreg) || null)));
+  document.querySelectorAll("[data-aldis]").forEach((b) => (b.onclick = async () => {
+    const a = S.alertas.find((x) => x.id === b.dataset.aldis); if (!a) return;
+    a.status = "dispensado"; render();
+    const { error } = await sb.rpc("fechar_alerta", { p_alerta: a.id, p_status: "dispensado" });
+    if (error) { a.status = "aberto"; render(); toast("Não consegui dispensar", error.message); }
+  }));
+  document.querySelectorAll("[data-novolead]").forEach((b) => (b.onclick = () => novoLeadModal(null)));
 }
 const binders = {};
 
@@ -429,7 +445,7 @@ function leadCard(l) {
   const acts = atvOf(l.id), c = counts(acts), cad = cadActive(l, acts) ? Math.min(cadDay(l), 6) : null;
   const resp = l.responsavel_id ? `${AV.svg(prof(l.responsavel_id) && prof(l.responsavel_id).avatar, 20)} ${esc(first(profName(l.responsavel_id)))}` : `<button class="btn sm" data-stop data-assume="${esc(l.id)}">Assumir lead</button>`;
   return `<div class="lc ${isLate(l) ? "late" : ""}" draggable="true" data-drag="${esc(l.id)}" data-lead="${esc(l.id)}" role="button" tabindex="0">
-    <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="nm">${esc(l.nome)}</span>${clBadge(l)}</div>
+    <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="nm">${esc(l.nome)}</span>${clBadge(l)}</div>${l.origem === "whatsapp" ? `<span class="tag wa">LEAD WHATSAPP</span>` : ""}
     <div class="meta"><span>${esc(l.segmento || "—")}</span><span>${esc(l.faturamento || "")}</span>${l.completo ? "" : `<span class="tag">Incompleto · P${l.ultima_etapa}</span>`}</div>
     <div class="meta"><span>⏱ No funil há ${since(ts(l.created_at))}</span><span>Nesta etapa há ${since(ts(l.status_alterado_em || l.created_at))}</span></div>
     ${l.status === "reuniao" && l.reuniao_em ? `<div class="meta"><span class="tag g">📅 ${esc(fmt(l.reuniao_em))}</span>${l.sdr_id ? `<span>SDR: ${esc(first(profName(l.sdr_id)))}</span>` : ""}</div>` : ""}
@@ -442,7 +458,7 @@ function boardLeads() {
 }
 function vFunil() {
   const L = boardLeads();
-  return `<div class="row" style="justify-content:space-between;margin-bottom:12px"><h1>Funil</h1>
+  return `<div class="row" style="justify-content:space-between;margin-bottom:12px"><div class="row"><h1>Funil</h1><button class="btn sm pri" data-novolead>+ Novo lead</button></div>
     <div class="chips"><button class="chip ${!S.boardMine ? "on" : ""}" id="bm0">Todos</button><button class="chip ${S.boardMine ? "on" : ""}" id="bm1">Meus leads</button>
     ${["", "A", "B", "C", "D"].map((c) => `<button class="chip ${S.boardClasse === c ? "on" : ""}" data-bc="${c}">${c || "Todas as classes"}</button>`).join("")}</div></div>
     <p class="tiny dim" style="margin:-6px 0 12px">Arraste os cards entre as colunas ou abra o lead para mudar a etapa. Borda vermelha = lead novo sem contato há mais de 15 min.</p>
@@ -636,7 +652,7 @@ function renderDrawer() {
   const oldPane = $("#drawer .pane"), paneY = oldPane && oldPane.dataset.lead === l.id ? oldPane.scrollTop : 0;
   const cadHtml = `<div class="cad">${[1, 2, 3, 4, 5].map((d) => `<div class="${active && d === day ? "today" : d < day ? "past" : ""}"><b>D${d}${active && d === day ? " · hoje" : ""}</b>${CAD[d].map(([t, lb]) => `${cadDone(l, acts, d, t) ? "✅" : active && d < day ? "⚠️" : "⬜"} ${esc(lb)}`).join("<br>")}</div>`).join("")}</div>`;
   $("#drawer").innerHTML = `<div class="pane" data-lead-pane="1" data-lead="${esc(l.id)}" role="dialog" aria-modal="true" aria-label="Lead ${esc(l.nome)}">
-    <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><h1 style="font-size:26px">${esc(l.nome)}</h1><div class="row" style="margin-top:6px">${clBadge(l)}<span class="tag">${esc(CLASSE_TXT[l.classe] || "")}</span>${l.completo ? "" : `<span class="tag">Incompleto — parou na pergunta ${l.ultima_etapa}</span>`}</div></div><button class="btn sm ghost" id="dx" aria-label="Fechar">✕</button></div>
+    <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><h1 style="font-size:26px">${esc(l.nome)}</h1><div class="row" style="margin-top:6px">${clBadge(l)}${l.origem === "whatsapp" ? `<span class="tag wa">LEAD WHATSAPP</span>` : ""}<span class="tag">${esc(CLASSE_TXT[l.classe] || "")}</span>${l.completo ? "" : `<span class="tag">Incompleto — parou na pergunta ${l.ultima_etapa}</span>`}</div></div><button class="btn sm ghost" id="dx" aria-label="Fechar">✕</button></div>
     <div class="row" style="margin-top:14px"><a class="btn wa" href="${esc(waLink(l.whatsapp))}" target="_blank" rel="noopener">💬 ${esc(phoneFmt(l.whatsapp))}</a>${l.instagram ? `<a class="btn" href="https://instagram.com/${encodeURIComponent(l.instagram)}" target="_blank" rel="noopener">📸 @${esc(l.instagram)}</a>` : ""}</div>
     <div class="counters" style="margin-top:14px"><span><b>${since(ts(l.created_at))}</b><br>no funil</span><span><b>${since(ts(l.status_alterado_em || l.created_at))}</b><br>nesta etapa</span><span><b>${c.lig}</b><br>ligações</span><span><b>${c.wpp}</b><br>mensagens</span><span><b>${c.tot}</b><br>tentativas</span></div>
     <div class="sec"><div class="row"><div style="flex:1;min-width:160px"><label for="d-st">Etapa</label><select id="d-st">${STATUS_ALL.map(([k, lb]) => `<option value="${k}" ${l.status === k ? "selected" : ""}>${lb}</option>`).join("")}</select></div>
@@ -1020,6 +1036,49 @@ function manualAds() {
       const { data, error } = await sb.from("ads_metricas").upsert(row, { onConflict: "plataforma,conta_id,campaign_id,data" }).select().single();
       if (error) { $("#ma-e").textContent = error.message; return; }
       closeModal(); S.ads = (S.ads || []).filter((a) => a.id !== data.id); S.ads.unshift(data); render(); toast("📊 Investimento lançado", `${nome} · ${brl(v)}`);
+    };
+  });
+}
+
+
+/* ================= LEAD WHATSAPP ================= */
+const CARGOS_Q = ["Dono / Sócio", "Diretor / Gerente", "Responsável pelo marketing", "Funcionário / Outro"];
+const SEGS_Q = ["Prestador de serviços", "Saúde / Clínica / Estética", "Alimentação / Delivery", "Varejo / Loja", "Automotivo", "Outro"];
+const FATS_Q = ["Até R$ 20 mil", "R$ 20 mil a R$ 50 mil", "R$ 50 mil a R$ 100 mil", "R$ 100 mil a R$ 300 mil", "Acima de R$ 300 mil"];
+function notifyWA(a) {
+  notify(`💬 LEAD WHATSAPP`, `${a.quantidade} ${a.quantidade === 1 ? "nova conversa" : "novas conversas"} · ${a.campanha_nome || "anúncio"} — responda em até 5 min!`);
+  setTimeout(beep, 450); setTimeout(beep, 900);
+}
+function alertBanner() {
+  const A = (S.alertas || []).filter((a) => a.status === "aberto");
+  if (!A.length) return "";
+  return `<section class="card" style="border-color:#25D366;background:#0d1f14;margin-bottom:14px"><h2 style="margin-bottom:6px">💬 LEAD WHATSAPP — responda em até 5 minutos</h2>
+  <p class="tiny dim" style="margin:0 0 10px">Novas conversas iniciadas pelos anúncios. Responda no WhatsApp e registre o lead para ele entrar no funil.</p>
+  <div class="list">${A.map((a) => { const late = Date.now() - ts(a.criado_em) > 5 * 60e3; return `<div class="item" style="${late ? "border-color:var(--red)" : ""}"><span class="tag wa">LEAD WHATSAPP</span><span class="grow"><b>${a.quantidade} ${a.quantidade === 1 ? "nova conversa" : "novas conversas"}</b> · ${esc(a.campanha_nome || "campanha")}<br><span class="tiny ${late ? "" : "muted"}" style="${late ? "color:#fca5a5" : ""}">${late ? "⚠️ passou dos 5 min · " : ""}chegou há <span data-since="${ts(a.criado_em)}">${dur(Date.now() - ts(a.criado_em))}</span></span></span><button class="btn sm pri" data-alreg="${esc(a.id)}">Registrar lead</button><button class="btn sm ghost" data-aldis="${esc(a.id)}">Dispensar</button></div>`; }).join("")}</div></section>`;
+}
+function novoLeadModal(alerta) {
+  const wa = !!alerta;
+  const sel = (id, arr) => `<select id="${id}"><option value="">—</option>${arr.map((x) => `<option>${esc(x)}</option>`).join("")}</select>`;
+  openModal(`<form id="nl"><h2>${wa ? "💬 Registrar LEAD WHATSAPP" : "+ Novo lead"}</h2>
+    ${wa ? `<p class="small muted" style="margin-top:-6px">Campanha: <b>${esc(alerta.campanha_nome || "—")}</b>. Ele entra no funil já como "Em contato", com a etiqueta LEAD WHATSAPP.</p>` : `<p class="small muted" style="margin-top:-6px">Para leads que chegaram por indicação, telefone ou outro canal.</p>`}
+    <div class="row"><div style="flex:1;min-width:160px"><label for="nl-n">Nome *</label><input id="nl-n" required maxlength="120"></div>
+    <div style="flex:1;min-width:160px"><label for="nl-w">WhatsApp com DDD *</label><input id="nl-w" required inputmode="tel" placeholder="(44) 99999-9999"></div></div>
+    <div class="row"><div style="flex:1;min-width:160px"><label for="nl-c">Cargo</label>${sel("nl-c", CARGOS_Q)}</div><div style="flex:1;min-width:160px"><label for="nl-s">Segmento</label>${sel("nl-s", SEGS_Q)}</div></div>
+    <div class="row"><div style="flex:1;min-width:160px"><label for="nl-f">Faturamento mensal</label>${sel("nl-f", FATS_Q)}</div><div style="flex:1;min-width:160px"><label for="nl-i">Instagram</label><input id="nl-i" maxlength="60" placeholder="@marca"></div></div>
+    ${wa ? "" : `<label><input type="checkbox" id="nl-wa" style="width:auto;margin-right:6px">Veio de anúncio pelo WhatsApp (etiqueta LEAD WHATSAPP)</label>`}
+    <label for="nl-o">Observação</label><textarea id="nl-o" maxlength="1000" placeholder="O que ele perguntou, interesse, melhor horário…"></textarea>
+    <p class="tiny dim">Score e classe são calculados na hora: quanto mais campos preencher, melhor a classificação.</p>
+    <div id="nl-e" class="err"></div><div class="row" style="justify-content:flex-end;margin-top:8px"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn pri" id="nl-ok">Registrar</button></div></form>`, () => {
+    $("#nl-n").focus();
+    $("#nl").onsubmit = async (e) => {
+      e.preventDefault(); $("#nl-ok").disabled = true;
+      const origem = wa || ($("#nl-wa") && $("#nl-wa").checked) ? "whatsapp" : "manual";
+      const { error } = await sb.rpc("criar_lead_manual", { p_nome: $("#nl-n").value.trim(), p_whatsapp: $("#nl-w").value, p_cargo: $("#nl-c").value || null, p_segmento: $("#nl-s").value || null, p_faturamento: $("#nl-f").value || null, p_instagram: $("#nl-i").value || null, p_origem: origem, p_campanha: wa ? alerta.campanha_nome : null, p_alerta: wa ? alerta.id : null, p_obs: $("#nl-o").value.trim() || null });
+      if (error) { $("#nl-e").textContent = error.message; $("#nl-ok").disabled = false; return; }
+      const nome = $("#nl-n").value.trim();
+      closeModal(); if (alerta) alerta.status = "atendido";
+      toast(origem === "whatsapp" ? "💬 LEAD WHATSAPP registrado" : "✅ Lead registrado", nome);
+      loadAll(true).then(schedule);
     };
   });
 }
