@@ -286,6 +286,7 @@ const ADMIN_VIEWS = new Set(["ganhos", "contratos", "anuncios", "equipe"]);
 function route(noRender) {
   const h = (location.hash || "#painel").slice(1);
   S.view = VIEWS.some((v) => v[0] === h) ? h : "painel";
+  S.mais = false;
   if (ADMIN_VIEWS.has(S.view) && !isAdmin()) S.view = "painel";
   if (!noRender) render();
 }
@@ -296,7 +297,22 @@ function shell(inner) {
     const b = k === "equipe" && pendentes ? `<span class="badge">${pendentes}</span>` : k === "funil" && late ? `<span class="badge">${late}</span>` : "";
     return `<a href="#${k}" class="${S.view === k ? "on" : ""}">${lb}${b}</a>`;
   }).join("");
-  return `<header class="top"><div class="in">
+  // Celular: barra fixa embaixo com as abas principais + "Mais" (as outras abas, alertas e sair).
+  const vis = VIEWS.filter((v) => !ADMIN_VIEWS.has(v[0]) || isAdmin());
+  const prim = ["painel", "funil", "leads", isAdmin() ? "ganhos" : "fria"];
+  const ICON = { painel: "🏠", funil: "🎯", fria: "🧊", leads: "👥", ganhos: "🏆", contratos: "📄", anuncios: "📊", equipe: "🧑‍🤝‍🧑", avatar: "🙂" };
+  const NOME = { fria: "Lista fria", ganhos: "Ganhos", contratos: "Contratos", anuncios: "Anúncios", avatar: "Meu avatar" };
+  const bdg = (k) => (k === "equipe" && pendentes ? pendentes : k === "funil" && late ? late : 0);
+  const resto = vis.filter((v) => !prim.includes(v[0]));
+  const maisOn = resto.some((v) => v[0] === S.view);
+  const maisBadge = resto.reduce((a, v) => a + bdg(v[0]), 0);
+  const bnav = `<nav class="bnav" aria-label="Abas">${prim.map((k) => { const n = bdg(k); return `<a href="#${k}" class="${S.view === k ? "on" : ""}"${S.view === k ? ' aria-current="page"' : ""}><span class="ic">${ICON[k]}</span>${NOME[k] || (VIEWS.find((v) => v[0] === k) || [k, k])[1]}${n ? `<span class="badge">${n}</span>` : ""}</a>`; }).join("")}
+    <button type="button" id="mais" class="${maisOn || S.mais ? "on" : ""}" aria-expanded="${S.mais ? "true" : "false"}"><span class="ic">☰</span>Mais${maisBadge ? `<span class="badge">${maisBadge}</span>` : ""}</button></nav>
+  ${S.mais ? `<div class="mais" id="mais-bg"><div class="sheet" role="dialog" aria-label="Mais opções">
+    ${resto.map(([k]) => { const n = bdg(k); return `<a href="#${k}" class="${S.view === k ? "on" : ""}"><span class="ic">${ICON[k]}</span>${NOME[k] || (VIEWS.find((v) => v[0] === k) || [k, k])[1]}${n ? `<span class="badge">${n}</span>` : ""}</a>`; }).join("")}
+    <button type="button" id="alt2"><span class="ic">${S.alerts ? "🔔" : "🔕"}</span>${S.alerts ? "Alertas ligados" : "Ativar alertas"}</button>
+    <button type="button" id="lo2"><span class="ic">↩</span>Sair</button></div></div>` : ""}`;
+  return `${bnav}<header class="top"><div class="in">
     <div class="logo">MY7<span>.</span></div>
     <nav class="nav">${nav}</nav><div class="spacer"></div>
     <button class="btn sm ghost" id="alt" title="Som e notificações de novos leads">${S.alerts ? "🔔 Alertas ligados" : "🔕 Ativar alertas"}</button>
@@ -322,6 +338,10 @@ function render() {
 }
 function bindShell() {
   $("#lo").onclick = () => { clearInterval(S.poll); clearInterval(S.tick); try { sessionStorage.removeItem(cacheKey()); } catch {} sb.auth.signOut(); };
+  if ($("#mais")) $("#mais").onclick = () => { S.mais = !S.mais; render(); };
+  if ($("#mais-bg")) $("#mais-bg").onclick = (e) => { if (e.target.id === "mais-bg" || e.target.closest("a")) { S.mais = false; if (e.target.id === "mais-bg") render(); } };
+  if ($("#lo2")) $("#lo2").onclick = () => $("#lo").click();
+  if ($("#alt2")) $("#alt2").onclick = () => { S.mais = false; $("#alt").click(); };
   $("#alt").onclick = async () => {
     S.alerts = !S.alerts;
     try { localStorage.setItem("my7crm-alerts", S.alerts ? "1" : "0"); } catch {}
