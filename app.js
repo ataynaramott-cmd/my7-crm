@@ -240,7 +240,7 @@ function renderAuth(mode = "entrar", msg = "") {
     <div class="tabs"><button type="button" data-m="entrar" class="${mode === "entrar" ? "on" : ""}">Entrar</button><button type="button" data-m="criar" class="${mode === "criar" ? "on" : ""}">Criar conta</button></div>
     ${mode === "criar" ? `<label for="nm">Seu nome</label><input id="nm" autocomplete="name" required maxlength="120">` : ""}
     <label for="em">E-mail</label><input id="em" type="email" autocomplete="email" required>
-    <label for="pw">Senha</label><input id="pw" type="password" autocomplete="${mode === "criar" ? "new-password" : "current-password"}" minlength="6" required>
+    <label for="pw">Senha</label><input id="pw" type="password" autocomplete="${mode === "criar" ? "new-password" : "current-password"}" minlength="${mode === "criar" ? 10 : 6}" maxlength="128" required>
     <button class="btn pri" style="width:100%;margin-top:16px" id="ab">${mode === "criar" ? "Criar minha conta" : "Entrar"}</button>
     <div id="am" class="${msg.startsWith("✅") ? "ok" : "err"}">${esc(msg)}</div>
     ${mode === "criar" ? `<p class="tiny dim" style="margin-top:12px">Depois de criar, o administrador precisa aprovar seu acesso.</p>` : ""}

@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://c--742e4128-e066-4310-b34c-9afa77cd1aac-prod.lovable.cloud wss://c--742e4128-e066-4310-b34c-9afa77cd1aac-prod.lovable.cloud; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'; manifest-src 'self'">
+<meta name="referrer" content="no-referrer">
+<script src="guard.js"></script>
 <meta name="theme-color" content="#0b0d0c">
 <title>MY7. CRM</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -20,6 +23,6 @@
 <script src="supabase.js"></script>
 <script src="avatar.js"></script>
 <script src="app.js"></script>
-<script>new MutationObserver(()=>{for(const c of document.querySelectorAll('.stack td:not([data-l])')){let i=0,p=c;while(p=p.previousElementSibling)i+=p.colSpan;const t=c.closest('table');c.dataset.l=(t&&t.rows[0].cells[i]&&t.rows[0].cells[i].textContent)||''}}).observe(document,{childList:true,subtree:true})</script>
+<script src="ui.js"></script>
 </body>
 </html>
