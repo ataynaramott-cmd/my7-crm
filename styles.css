@@ -172,3 +172,47 @@ tr.click{cursor:pointer}tr.click:hover td{background:var(--card2)}
   .bars .r{grid-template-columns:90px minmax(0,1fr) 36px}
 }
 @media(max-width:600px){table{font-size:13px}.stack thead{display:none}.stack tr{display:grid;padding-block:10px;border-bottom:1px solid var(--line)}.stack td{display:flow-root;border:0;padding:3px 0;padding-inline-start:8em;text-align:start}.stack td::before{content:attr(data-l);float:inline-start;width:7.5em;margin-inline-start:-8em;color:var(--mute)}.stack td:empty{display:none}}
+
+/* celular: barra de abas embaixo, nada cortado */
+.bnav,.mais{display:none}
+@media (max-width:760px){
+  .top .nav,.top #alt,.top #lo{display:none}
+  .top .in{flex-wrap:nowrap;justify-content:space-between}
+  main{padding:14px 12px calc(84px + env(safe-area-inset-bottom))}
+  .card{padding:14px}
+  .bnav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));position:fixed;left:0;right:0;bottom:0;z-index:40;background:rgba(11,13,12,.96);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+  .bnav a,.bnav button{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 2px;border:0;background:none;border-radius:12px;color:var(--mute);text-decoration:none;font-size:11px;font-weight:600;line-height:1.2;text-align:center}
+  .bnav .ic{font-size:20px;line-height:1}
+  .bnav .on{color:var(--ink);background:var(--card2)}
+  .bnav .badge{position:absolute;top:0;left:calc(50% + 6px);height:18px;min-width:18px;font-size:10px}
+  .mais{display:flex;align-items:flex-end;position:fixed;inset:0;z-index:39;background:rgba(0,0,0,.55)}
+  .mais .sheet{width:100%;background:var(--card);border-top:1px solid var(--line);border-radius:20px 20px 0 0;padding:12px 12px calc(84px + env(safe-area-inset-bottom));display:grid;gap:6px}
+  .mais a,.mais button{display:flex;align-items:center;gap:12px;min-height:48px;padding:0 14px;border-radius:12px;border:1px solid var(--line);background:var(--card2);color:var(--ink);text-decoration:none;font-weight:600;font-size:15px;text-align:left}
+  .mais a.on{border-color:var(--g)}
+  .mais .ic{font-size:18px;width:24px;text-align:center}
+  .mais .badge{margin-left:auto}
+  .toasts{bottom:calc(84px + env(safe-area-inset-bottom));left:12px;right:12px;max-width:none}
+  .board{grid-auto-columns:calc(100vw - 56px);scroll-snap-type:x mandatory}
+  .drawer .pane{padding:16px 14px calc(40px + env(safe-area-inset-bottom))}
+  .modal{padding:10px;align-items:end}
+  .modal .box{max-height:92dvh;overflow-y:auto;padding:16px}
+  .acts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .acts .btn{white-space:normal;text-align:center;line-height:1.25;padding:6px 10px}
+  .btn{max-width:100%}
+  .filters{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .filters>:first-child{grid-column:1/-1}
+}
+@media(max-width:600px){
+  .item{flex-wrap:wrap}.item .grow{flex:1 1 170px}
+  .stack td{padding-inline-start:9.5em;overflow-wrap:anywhere;white-space:normal}
+  .stack td::before{width:9em;margin-inline-start:-9.5em;white-space:normal;padding-right:6px}
+  .stack td .row{flex-wrap:wrap!important}
+  .hello{gap:10px}
+  .bars .r{grid-template-columns:minmax(0,1fr) 36px;gap:4px 10px;margin:10px 0}
+  .bars .r>:first-child{grid-column:1/-1}
+  .cad{grid-template-columns:1fr;overflow:visible}
+  .cad div{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
+  .cad b{margin:0;min-width:2em}
+  .cols em{writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px}
+  code{overflow-wrap:anywhere}
+}
